@@ -1,0 +1,3 @@
+hello_world:
+  module: mad3.plugin.hello_world
+  enabled: true
