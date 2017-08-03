@@ -82,9 +82,14 @@ class MadFile:
         filename = os.path.abspath(os.path.expanduser(filename))
         assert os.path.exists(filename)
 
+        if not os.access(filename, os.R_OK):
+            raise PermissionError("m3 cannot read file {}".format(filename))
+        
         self.filename = filename
         self.filestat = os.stat(filename)
 
+
+        
         # step one - determine transient id of this file
         lg.debug('calc transient id for {}'.format(self.filename))
         self.transient_id = self.get_transient_id()
@@ -105,12 +110,14 @@ class MadFile:
             self.dirty = True
 
             # calculate fresh sha256
-            self.sha256 = self._calculate_checksum(hashlib.sha256)
+            self.app.counter['chksum'] += 1
+            self.sha1, self.sha256 = self.calculate_checksum()
 
             # create an stub transient rec 
             self.transient_rec = {
                 '_id': self.transient_id,
                 'sha256': self.sha256,
+                'sha1': self.sha1,
                 'filename': self.filename,
                 'hostname':  self.app.conf['hostname']}
 
@@ -121,31 +128,31 @@ class MadFile:
             lg.debug('transient record found!')
             self.app.counter['transload'] += 1
             self.sha256 = self.transient_rec['sha256']
-
+            self.sha1 = self.transient_rec['sha1']
+            
             # refrehs the transient record - see if there are changes
             self.refresh()
 
             # if something changed - recalc thte sha256
             if self.dirty:
-                self.app.counter['transdirty'] += 1
-
-                newsha256 = self._calculate_checksum(hashlib.sha256)
+                self.app.counter['re-chksum'] += 1
+                newsha1, newsha256 = self.calculate_checksum()
                 if newsha256 == self.transient_rec['sha256']:
                     self.app.counter['sha256_ok'] += 1
                 else:
                     self.app.counter['sha256_change!'] += 1
+                    self.transient_rec['sha1'] = newsha1
                     self.transient_rec['sha256'] = newsha256
                     # TODO: Create a transaction!!!
+                    # TODO: copy core record data??
 
         self.core_rec = self.db.core.find_one({'_id': self.sha256})
 
         if self.core_rec is None:
             lg.debug('Core rec not found')
-            self.core_rec = {'_id': self.sha256}
-            pass
+            self.core_rec = {'_id': self.sha256, 'sha1': self.sha1}
         else:
             for k, v in self.core_rec.items():
-#                print('>>>', k, v)
                 if k == '_id': continue
                 if (k not in self.transient_rec) or \
                         (self.transient_rec[k] != v):
@@ -161,7 +168,8 @@ class MadFile:
                     .upsert()\
                     .update({"$set": self.transient_rec})
             else:
-                self.db.transient.insert_one(self.transient_rec)
+                self.db.transient.update({'_id': self.transient_id},
+                                         self.transient_rec, upsert=True)
             self.dirty=False
 
         self.app.run_hook('onload', self)
@@ -179,19 +187,30 @@ class MadFile:
         key, kinfo = key_info(self.app.conf, rawkey)
         val = kinfo['transformer'](val)
         setter = kinfo['setter']
+        keycat = kinfo['cat']
 
-        #set the transient record, 
+        if not 'transient' in keycat:
+            return
+        
+        # determine new key value using the `setter`
         changed, setvalue = setter(self.transient_rec, key, val)
-
 
         lg.debug('Set "{}" = "{}" for {}"'.format(key, val, setvalue))
 
+        if 'core' in keycat:
+            if (key in self.core_rec) and (self.core_rec[key] == setvalue):
+                #already in core
+                pass
+            else:
+                self.core_rec[key] = setvalue
+                changed = True
 
-        if (key in self.core_rec) and (self.core_rec[key] == setvalue):
-            #already in core
+        # store in transient db
+        if (key in self.transient_rec) and (self.transient_rec[key] == setvalue):
+            #already in transient
             pass
         else:
-            self.core_rec[key] = setvalue
+            self.transient_rec[key] = setvalue
             changed = True
 
         if changed:
@@ -288,19 +307,23 @@ class MadFile:
         return sha256.hexdigest()
 
 
-    def _calculate_checksum(self, hashobject):
+    def calculate_checksum(self):
         "Return the sha1sum for a certain filename - expected is a full path"
-        h = hashobject()
+        h2 = hashlib.sha256()
+        h1 = hashlib.sha1()
         blocksize = 2 ** 20
 
         try:
             with open(self.filename, 'rb') as F:
                 for chunk in iter(lambda: F.read(blocksize), b''):
-                    h.update(chunk)
-            return h.hexdigest()
+                    h1.update(chunk)
+                    h2.update(chunk)
+                    self.app.counter['chksum_sz'] += len(chunk)
+                    
+            return h1.hexdigest(), h2.hexdigest()
 
         except IOError:
             # something went wrong reading the file (no permissions??
             # ignore)
-            lg.warning("Cannot generate checksum for %s", filename)
+            lg.warning("Cannot generate checksum for %s", self.filename)
             return None

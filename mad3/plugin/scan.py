@@ -11,36 +11,28 @@ import leip
 
 from mad3.madfile import MadFile
 from mad3.db import get_db
-
+from mad3.util import nicesize
 
 lg = logging.getLogger(__name__)
 
 
 def print_counter(c):
+    """Print progress counter to screen."""
     def fmt(i):
         k, v = i
         if k.endswith('_sz'):
-            if v > 1e12:
-                return '{}:{:.1f}T,'.format(k, v/1e12)
-            elif v > 1e9:
-                return '{}:{:.1f}G,'.format(k, v/1e9)
-            elif v > 1e6:
-                return '{}:{:.1f}M,'.format(k, v/1e6)
-            elif v > 1e3:
-                return '{}:{:.1f}K'.format(k, v/1e3)
-            else:
-                return '{}:{}'.format(k, v)
+            return '{}:{}'.format(k, nicesize(v))
         else:
             return '{}:{}'.format(k, v)
 
-    print("\r" + " ".join(map(fmt, sorted(c.items()))) + ' --               ',
-          end="")
+    print('\r'
+          + ' '.join(map(fmt, sorted(c.items())))
+          + ' <<               ',
+          end='')
     sys.stdout.flush()
 
 
-@leip.flag('--forget', help='forget all transient data for this ' +
-           'directory and below')
-@leip.flag('-f', '--force', help='process all files, ignore cache')
+@leip.flag('-r', '--refresh', help='refresh all files')
 @leip.command
 def scan(app, args):
 
@@ -49,18 +41,9 @@ def scan(app, args):
 
     app.bulk_init()
 
-    # if args.forget:
-    #     session.query(TransientRec)\
-    #            .filter(TransientRec.dirname.like('{}%'.format(basedir)))\
-    #            .delete(synchronize_session=False)
-    #     session.commit()
-    #     return
-
-    # query sqlalchemy for all files starting with this path
-
-    # lg.info("query db")         #
-
     ff_regex = "^{}".format(basedir)
+
+    lg.info("Query database for files below\n    {}".format(basedir))
     allfilesdb = db.transient.find({'filename': {"$regex": ff_regex}},
                                  projection=['filename', 'mtime', 'size'])
 
@@ -71,9 +54,10 @@ def scan(app, args):
         file2id[x['filename']] = x['_id']
 
     allfiles = set(allfiles)
+    lg.info("Found {} files in db".format(len(allfiles)))
+
 
     madignore = os.path.expanduser('~/.madignore')
-
     cwd = os.path.abspath(os.path.normpath(os.getcwd()))
     cl = r"find {} -type f -printf '%p\t%T@\t%s\n'".format(cwd)
 
@@ -97,14 +81,18 @@ def scan(app, args):
     lg.info("unix find found {} files".format(len(o)))
     now = set(o)
 
-    changed = list(now - allfiles)
+    if args.refresh:
+        changed = list(now)
+    else:
+        changed = list(now - allfiles)
+
     deleted = list(allfiles - now)
 
     app.counter['indb'] = len(allfiles)
     app.counter['onfs'] = len(now)
-    app.counter['changed'] = len(changed)
+    app.counter['check'] = len(changed)
     app.counter['rm'] = len(deleted)
-    
+
     lg.info('in database       : {:>8d}'.format(len(allfiles)))
     lg.info('on filesystem     : {:>8d}'.format(len(now)))
     lg.info('total new/changed : {:>8d}'.format(len(changed)))
@@ -123,7 +111,7 @@ def scan(app, args):
 
     changed = set([f[0] for f in changed])
     deleted = set([f[0] for f in deleted])
-   
+
 
     lg.info("{} files seem changed".format(len(changed)))
 
@@ -135,8 +123,12 @@ def scan(app, args):
     for filename in changed:
 
         app.counter['changed'] += 1
-        mfile = MadFile(app, filename)
-        
+        try:
+            mfile = MadFile(app, filename)
+        except PermissionError as e:
+            app.counter['noaccess'] += 1
+            continue
+
         if mfile.dirty:
             mfile.save()
 
@@ -149,4 +141,3 @@ def scan(app, args):
     print_counter(app.counter)
     # ensure we end on a newline
     print()
-

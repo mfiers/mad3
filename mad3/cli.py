@@ -3,7 +3,9 @@ Main dispatch code
 """
 
 from collections import Counter
+import sys
 import socket
+
 import leip
 from mad3 import ui
 from mad3 import madfile
@@ -26,10 +28,12 @@ app.discover(globals())
 
 # ensure hostname is defined
 if not 'hostname' in app.conf:
-    app.warning("Hostname is not defined")
-    app.message("Try: m3 conf set hostname '{hostname}'",
-                hostname = socket.gethostname())
-
+    if not 'conf set hostname' in ' '.join(sys.argv):
+        app.warning("Hostname is not defined")
+        app.message("Try: m3 conf set hostname '{hostname}'",
+                    hostname = socket.gethostname())
+        exit(-1)
+    
 def dispatch():
     """
     Run the mad3 app

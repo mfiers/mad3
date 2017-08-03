@@ -1,19 +1,34 @@
 
+from datetime import datetime, timedelta
+import hashlib
 import logging
 import os
 import pickle
-
-
-import mad3.db
+import sys
+import uuid
 
 
 lg = logging.getLogger(__name__)
 
 
+def nicedictprint(dct):
+    """Create a nicely formatted screenprint of a dictionary."""
+    import yaml
+    print(yaml.safe_dump(dct, sys.stdout, default_flow_style=False))
+
+
+def get_random_sha256():
+    """Return a random 64 byte string equivalent to a sha256."""
+    tid = hashlib.sha256()
+    for x in range(10):
+        tid.update(uuid.uuid4().bytes)
+    return tid.hexdigest()
+
+
 datatypes = dict(
     str=str,
     int=int,
-    float=float )
+    float=float)
 
 
 def setone(data, k, v):
@@ -26,12 +41,10 @@ def setone(data, k, v):
 
 def setset(data, k, v):
     """Add a value to a set, and check if it has changed."""
-
     if not isinstance(v, list):
         v = [v]
 
     if k in data:
-        #print#('found', k, data[k], isinstance(data[k], list))
         if not isinstance(data[k], list):
             data[k] = [data[k]]
         changed = False
@@ -64,6 +77,7 @@ def key_info(conf, key):
         return key_info(conf, info['alias'])
 
     info['shape'] = str(info.get('shape', 'one'))
+    info['cat'] = info.get('cat', ['transient', 'core'])
     info['type'] = info.get('type', 'str')
     info['transformer'] = datatypes.get(info['type'], str)
     info['setter'] = datasetter.get(info['shape'], setone)
@@ -85,7 +99,7 @@ def nicesize(val ,precision=2):
                    (15, 'P'), (12, 'T'), (9, 'G'),
                    (6, 'M'), (3, 'K')]:
         if val > (10 ** pw):
-            formatstring = '{{:.{}f}} {}b'.format(precision, metric)
+            formatstring = '{{:.{}f}}{}b'.format(precision, metric)
             return formatstring.format(val * (10 ** -pw))
     return str(val)
 
@@ -157,3 +171,87 @@ def persistent_cache(path, cache_on, duration):
 
     return decorator
 
+def mongo_cache(app, func, name, duration, force=False):
+    """
+    Disk persistent cache that reruns a function once every
+    'duration' no of seconds
+    """
+    from mad3.db import get_db
+    db = get_db(app)
+    cache = db['cache']
+
+    lg.debug("cache : %s", name)
+
+    #find most recent cache record
+    tcutoff = datetime.now() - timedelta(seconds=duration)
+    ccursor = cache.find({'name': name,
+                          'date': {"$gt": tcutoff}
+                          }).sort('date', -1)
+
+    if not force:
+        try:
+            crec = ccursor.next()
+            return crec['result']
+
+        except StopIteration as e:
+            # no record in cache (?)
+            lg.debug("no record found")
+
+    lg.debug("run function {}".format(name))
+    result = func()
+    cacherec = {'name': name,
+                'date': datetime.now(),
+                'result': result }
+    cache.insert(cacherec)
+    return result
+
+
+
+    # if force:
+    #     run = True
+
+    #     if not os.path.exists(full_cache_name):
+    #         #file does not exist. Run!
+    #         run = True
+    #     else:
+    #         #file exists - but is it more recent than
+    #         #duration (in seconds)
+    #         mtime = os.path.getmtime(full_cache_name)
+    #         age = time.time() - mtime
+    #         if age > duration:
+    #             lg.debug("Cache file is too recent")
+    #             lg.debug("age: %d", age)
+    #             lg.debug("cache refresh: %d", duration)
+    #             run = True
+
+    #     if not run:
+    #         #load from cache
+    #         lg.debug("loading from cache: %s", full_cache_name)
+    #         with open(full_cache_name, 'rb') as F:
+    #             try:
+    #                 res = pickle.load(F)
+    #                 return res
+    #             except EOFError:
+    #                 lg.warning("problem loading cached object")
+    #                 os.unlink(full_cache_name)
+
+
+    #         #no cache - create
+    #         lg.debug("no cache - running function %s", original_func)
+    #         rv = original_func(*args, **kwargs)
+    #         lg.debug('write to cache: %s', full_cache_name)
+
+    #         if not os.path.exists(path):
+    #             os.makedirs(path)
+    #         try:
+    #             with open(full_cache_name, 'wb', pickle.HIGHEST_PROTOCOL) as F:
+    #                 pickle.dump(rv, F)
+    #         except:
+    #             print(rv)
+    #             raise
+
+    #         return rv
+
+    #     return new_func
+
+    # return decorator

@@ -1,6 +1,5 @@
 
 
-
 import colors
 
 def logo(self):
