@@ -1,6 +1,7 @@
 """
 Transaction functions for Mad3
 """
+# noqa: T484
 
 import argparse
 from datetime import datetime
@@ -13,116 +14,65 @@ import sys
 
 import jinja2
 import leip
-import yaml
-
 
 from mad3.db import get_db
-from mad3.util import get_random_sha256, nicedictprint
-
+from mad3.util import nicedictprint
+from mad3.util import nicetimedelta
 from mad3.madfile import MadFile
+import mad3.transaction
 
 lg = logging.getLogger(__name__)
 
 
-class Transaction:
-    """A Transaction represents a relationship between files."""
-
-    def __init__(self, app: Type[leip.app]) -> None:
-        """Initialize the Transcation method."""
-        self.app = app
-        self.data = {}    # type: dict
-
-    def init(self) -> None:
-        """Initialze the transaction with default variables."""
-        self.data = dict(
-            _id=get_random_sha256(),
-            time=datetime.now(),
-            pwd=os.getcwd(),
-            state='pending',
-            hostname=self.app.conf['hostname'])
-
-    def save(self):
-        """Save transaction to the database."""
-        db = get_db(self.app)
-        transact = db['transaction']
-        transact.insert(self.data)
-
-    @property
-    def state(self):
-        """Transaction state."""
-        return self.data.get('state')
-
-    @state.setter
-    def state(self, new):
-        self.data['state'] = new
-
-    @property
-    def time(self):
-        """Time stamp."""
-        return self.data.get('time')
-
-    @time.setter
-    def time(self, new):
-        self.data['time'] = new
-
-    @property
-    def script(self):
-        """Script responsible for this transaction."""
-        return self.data.get('script')
-
-    @script.setter
-    def script(self, new):
-        self.data['script'] = new
-
-    def add_io(self, category, filename, group=None):
-        """Set an IO field in a transaction."""
-        if group is None:
-            group = category
-
-        filename = os.path.abspath(os.path.expanduser(filename))
-
-        # add the filename to the transaction data
-
-        to_add = dict(
-            category=category,
-            group=group,
-            filename=filename
-        )
-
-        if os.path.exists(filename):
-            mf = MadFile(self.app, filename)
-            to_add['sha256'] = mf.sha256
-
-        if 'io' not in self.data:
-            self.data['io'] = []
-        self.data['io'].append(to_add)
-
-
 class Template:
     """Transaction template."""
+
+    finditem = re.compile((r'\[\[([><\?])\s*(\w+)(.*?)\s*\]\]'))
 
     def __init__(self,
                  app: Type[leip.app],
                  name: str,
                  template_args: dict) -> None:
         """Instantiate transaction template."""
+        # Find and read the template file
         tfile = os.path.expanduser('~/m3/' + name + '.m3t')
         with open(tfile) as F:
-            tmpl = F.read()
+            self.raw_template = F.read()
 
         self.app = app
-        self.transaction = Transaction(self.app)
+        self.name = name
+        self.template_args = template_args
+
+        # Contains information on the template variables
         self.data = {}          # type: dict
-        self.tmpl = tmpl        # type: str
+
+        # Ultimately contains the determined values of the template vars
         self.values = {}        # type: dict
 
-        # prepare transaction
-        self.transaction = Transaction(app)
+        # Transaction object represents what happens in the m3 system
+        self.transaction = mad3.transaction.Transaction(self.app)
         self.transaction.init()
-        self.transaction
 
-        finditem = re.compile((r'\[\[([><\?])\s*(\w+)(.*?)\s*\]\]'))
-        for fitem in finditem.finditer(tmpl):
+    def prepare(self):
+        """Parse & render template."""
+        self.parse_template()
+        self.build_argparser()
+        self.parse_arguments()
+        self.render_template()
+
+    def checkrun(self):
+        """Check whether we should run."""
+        return self.transaction.check(action='message')
+
+
+    def find_in_db(self, *args, **kwargs):
+        """Check whether we should run."""
+        return self.transaction.find_in_db(*args, **kwargs)
+
+
+    def parse_template(self):
+        """Parse the template string."""
+        for fitem in self.finditem.finditer(self.raw_template):
             fgrp = fitem.groups()
             categ = fgrp[0]
             name = fgrp[1]
@@ -134,8 +84,9 @@ class Template:
                     rest[key] = val
             self.data[name] = (categ, rest)
 
-        # build argparse
-        parser = argparse.ArgumentParser(usage='template arguments')
+    def build_argparser(self):
+        """Build the argument parser."""
+        self.argparser = argparse.ArgumentParser(usage='template arguments')
         firstletters = [x[0] for x in self.data.keys()]
         for name, (categ, rest) in self.data.items():
             argargs = {}
@@ -147,32 +98,35 @@ class Template:
             elif 'default' not in rest:
                 argargs['required'] = True
             if firstletters.count(name[0]) == 1:
-                parser.add_argument('-' + name[0],
+                self.argparser.add_argument('-' + name[0],
                                     '--' + name, **argargs)  # noqa: T484
             else:
-                parser.add_argument('--' + name, **argargs)  # noqa: T484
+                self.argparser.add_argument('--' + name, **argargs) # noqa:T484
 
-        args = parser.parse_args(template_args)  # noqa: T484
+    def parse_arguments(self):
+        """Actually parse and process the passed arguments."""
+        self.args = self.argparser.parse_args(self.template_args)  # noqa: T484
 
         # get values from args or defaults
         for name, (categ, rest) in self.data.items():
-            val = getattr(args, name)
+            val = getattr(self.args, name)
             if rest.get('type') == 'flag':
                 val = str(rest.get('val')) if val else ''
             else:
                 val = val if val is not None else rest.get('default')
             self.values[name] = val
 
-        # possibly fill in substitutions &
-        # recognize_template
+        # possibly fill in substitutions in the template variables
         findreplace = re.compile(r'{{\s*(\w+)\s*}}')
         for name, val in self.values.items():
             if findreplace.search(val):
                 t = jinja2.Template(val)
                 self.values[name] = t.render(self.values)
 
+    def render_template(self):
+        """Render the raw template into a run-ready script."""
         # create and expand commandline template
-        tmpl_r1 = finditem.sub(r'{{\2}}', self.tmpl)
+        tmpl_r1 = self.finditem.sub(r'{{\2}}', self.raw_template)
         tmpl_r2 = jinja2.Template(tmpl_r1).render(self.values)
         self.transaction.script = tmpl_r2
 
@@ -203,9 +157,12 @@ class Template:
 def tap(app, args):
     """Apply transaction template."""
     tmpl = Template(app, args.template, args.template_args)
-    tmpl.execute()
-    nicedictprint(tmpl.transaction.data)
-    tmpl.save()
+    tmpl.prepare()
+    tstate = tmpl.checkrun()
+    tmpl.find_in_db()
+    #tmpl.execute()
+    #nicedictprint(tmpl.transaction.data)
+    #tmpl.save()
 
 
 @leip.arg('template_args', nargs='*')
@@ -221,10 +178,11 @@ def tmap(app, args):
 #    pprint(tmpl.transaction.data)
 
 
+@leip.flag('-H', '--human', help='output human friendly transaction records')
 @leip.arg('-s', '--state')
-@leip.arg('-H', '--hostname')
+@leip.arg('-t', '--hostname')
 @leip.arg('-i', '--id')
-@leip.arg('-f', '--file', help="Involving this file")
+@leip.arg('-f', '--file', help='Involving this file')
 @leip.command
 def tfind(app: Type[leip.app],
           args: Type[argparse.Namespace]):
@@ -248,13 +206,25 @@ def tfind(app: Type[leip.app],
     if filename:
         madfile = MadFile(app, filename)
         sha256 = madfile.sha256
-        print(madfile, sha256)
+        query['io.sha256'] = sha256
+        # print(madfile, sha256)
 
     simple_query('hostname')
     simple_query('state')
+
     print(query)
-#    for r in transact.find(query):#
-#        nicedictprint(r)
+    for r in transact.find(query):
+        if args.human:
+            print("{:>6s} {} {:8} {}:{}".format(
+                nicetimedelta(r['time']),
+                r['_id'][:10], r['state'],
+                r['hostname'], r['pwd'],
+                ))
+            for io in r['io']:
+                marker = '<' if io['category'] == 'input' else '>'
+                print('  {} {}'.format(marker, io['filename']))
+        else:
+            nicedictprint(r)
 
 
 @leip.arg('-c', '--script', help='Script to run (- == stdin)')
@@ -269,7 +239,7 @@ def tfind(app: Type[leip.app],
 def tadd(app: Type[leip.app],
          args: Type[argparse.Namespace]):
     """Add a transaction."""
-    transaction = Transaction(app)
+    transaction = mad3.transaction.Transaction(app)
     transaction.init()
     transaction.state = args.state    # noqa: T484
 

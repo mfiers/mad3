@@ -2,11 +2,11 @@
 
 from setuptools import setup, find_packages
 
-#one line description
+# one line description
 with open('DESCRIPTION') as F:
     description = F.read().strip()
 
-#version number
+# version number
 with open('VERSION') as F:
     version = F.read().strip()
 
@@ -20,14 +20,13 @@ setup(name='mad3',
       description=description,
       author='',
       author_email='',
-      entry_points = entry_points,
+      entry_points=entry_points,
       include_package_data=True,
       url='https://encrypted.google.com/#q=mad3&safe=off',
       packages=find_packages(),
       install_requires=[
-                'Leip',
-                ],
-      classifiers = [
+                'Leip', 'pymongo'],
+      classifiers=[
         'Development Status :: 4 - Beta',
         'Environment :: Console',
         'Operating System :: OS Independent',
@@ -35,5 +34,4 @@ setup(name='mad3',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
-        ]
-     )
+        ])

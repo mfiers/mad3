@@ -28,14 +28,6 @@ def _single_sum(app, group_by=None, force=False):
     return rv
 
 
-@leip.command
-def truncate(app, args):
-    """Drop all data from transient"""
-    db = get_db(app)
-    # db.transient.drop()
-    # db.core.drop()
-#    db.transaction.drop()
-
 @leip.flag('-H', '--human', help='human readable')
 @leip.flag('-f', '--force')
 @leip.command

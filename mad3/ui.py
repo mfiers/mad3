@@ -1,27 +1,37 @@
 
 
 import colors
+import leip
 
 def logo(self):
-    return colors.color('m3', bg=74) + colors.color(' ', bg=202)
+    """
+    Return Logo string.
+    
+    """
+
+    return colors.color('m3', bg=74) + ' '
+
 
 def warning(self, *args, **kwargs):
+    """Print a warning to screen."""
     fg = self.conf['color']['warning']['fg']
     bg = self.conf['color']['warning']['bg']
-    message = " ".join(args)
+    message = ' '.join(map(str, args))
     if kwargs:
         message = message.format(**kwargs)
     print(logo(self) + colors.color(message, bg=bg, fg=fg))
+
 
 def message(self, *args, **kwargs):
-    fg = self.conf['color']['message']['fg']
-    bg = self.conf['color']['message']['bg']
-    message = " ".join(args)
+    """Print a message to screen."""
+    message = ' '.join(map(str, args))
     if kwargs:
         message = message.format(**kwargs)
-    print(logo(self) + colors.color(message, bg=bg, fg=fg))
+    print(logo(self) + message)
 
-def init_app(app):
-    app.logo = logo
-    app.warning = warning
-    app.message = message
+
+def init_app(appclass: leip.app):
+    """Initialization attach functions to the app class."""
+    appclass.logo = logo
+    appclass.warning = warning
+    appclass.message = message

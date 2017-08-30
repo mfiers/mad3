@@ -2,19 +2,70 @@
 from datetime import datetime, timedelta
 import hashlib
 import logging
+import math
 import os
 import pickle
 import sys
+from typing import Type
 import uuid
 
 
 lg = logging.getLogger(__name__)
 
 
-def nicedictprint(dct):
+def nicetime(t: Type[datetime]):
+    """Return a nicely formatted time string."""
+    return t
+
+
+def nicetimedelta(t: Type[datetime]):
+    """Return a nicely formatted delta time (to now)."""
+    dt = datetime.now() - t  # noqa: T484
+    rv = []
+    cnt = 0
+    for ident, delta in [('y', timedelta(days=365)),
+                         ('M', timedelta(days=30)),
+                         ('w', timedelta(days=7)),
+                         ('d', timedelta(days=1)),
+                         ('h', timedelta(seconds=60*60)),
+                         ('m', timedelta(seconds=60)),
+                         ]:
+        if dt > delta:
+            cnt += 1
+            nofound = math.floor(dt.seconds / delta.seconds)
+            dt = timedelta(seconds=(dt.seconds - (nofound * delta.seconds)))
+            rv.append('{}{}'.format(nofound, ident))
+            if cnt >= 2:
+                return ''.join(rv)
+    rv.append('{}s'.format(int(dt.seconds)))
+    return ''.join(rv)
+
+
+def nicedictprint(dct: dict):
     """Create a nicely formatted screenprint of a dictionary."""
     import yaml
     print(yaml.safe_dump(dct, sys.stdout, default_flow_style=False))
+
+
+def nicenumber(val: int):
+    """Return a number with , separators for the thousands."""
+    sval = str(val)[::-1]
+    rv = []
+    for i in range(0, len(sval), 3):
+        rv.append(sval[i:i+3][::-1])
+    return ','.join(rv[::-1])
+
+
+def nicesize(val: int,
+             precision=2):
+    """Convert a number to a nicer readable number with Tb/Gb postfixes."""
+    for pw, metric in [(24, 'Y'), (21, 'Z'), (18, 'E'),
+                       (15, 'P'), (12, 'T'), (9, 'G'),
+                       (6, 'M'), (3, 'K')]:
+        if val > (10 ** pw):
+            formatstring = '{{:.{}f}}{}b'.format(precision, metric)
+            return formatstring.format(val * (10 ** -pw))
+    return str(val)
 
 
 def get_random_sha256():
@@ -82,26 +133,6 @@ def key_info(conf, key):
     info['transformer'] = datatypes.get(info['type'], str)
     info['setter'] = datasetter.get(info['shape'], setone)
     return key, info
-
-
-def nicenumber(val):
-    """Return a number with , separators for the thousands."""
-    val = str(val)[::-1]
-    rv = []
-    for i in range(0, len(val), 3):
-        rv.append(val[i:i+3][::-1])
-    return ','.join(rv[::-1])
-
-
-def nicesize(val ,precision=2):
-    """Convert a number to a nicer readable number with Tb/Gb postfixes."""
-    for pw, metric in [(24, 'Y'), (21, 'Z'), (18, 'E'),
-                   (15, 'P'), (12, 'T'), (9, 'G'),
-                   (6, 'M'), (3, 'K')]:
-        if val > (10 ** pw):
-            formatstring = '{{:.{}f}}{}b'.format(precision, metric)
-            return formatstring.format(val * (10 ** -pw))
-    return str(val)
 
 
 def persistent_cache(path, cache_on, duration):
