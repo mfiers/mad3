@@ -12,17 +12,17 @@ from mad3.util import key_info, nicesize, nicenumber
 lg = logging.getLogger(__name__)
 
 
-#@persistent_cache(leip.get_cache_dir('mad2', 'mongo', 'sum'), 'group_by', 62400)
 def _single_sum(app, group_by=None, force=False):
     groupby_field = "${}".format(group_by)
     db = get_db(app)
-    query = [{'$group': {
+    query = [{'$unwind': groupby_field},
+             {'$group': {
                 "_id": groupby_field,
                 "total": {"$sum": "$size"},
                 "count": {"$sum": 1}}},
-             {'$unwind': "$_id"},
             {"$sort": {"total": -1
                    }}]
+
     res = db.transient.aggregate(query)
     rv = list(res)
     return rv
@@ -113,6 +113,7 @@ def sum(app, args):
             categ = reshost['_id']
             if categ is None:
                 categ = "<undefined>"
+
             print(fms.format(
                 categ, total_human, count_human))
         else:
@@ -127,3 +128,95 @@ def sum(app, args):
             "Total", total_size_human, total_count_human))
     else:
         print("Total\t{}\t{}".format(total_size, total_count))
+
+
+
+
+FIND_WASTER_PIPELINE = [
+    {"$project": {"filesize": 1,
+                  "sha1sum": 1,
+                  "username": 1,
+                  "usage": {"$divide": ["$filesize", "$nlink"]}}},
+    {"$group": {"_id": "$sha1sum",
+                "user": {"$addToSet":  "$username"},
+                "no_records": {"$sum": 1},
+                "mean_usage": {"$avg": "$usage"},
+                "total_usage": {"$sum": "$usage"},
+                "filesize": {"$max": "$filesize"}}},
+    {"$project": {"filesize": 1,
+                  "total_usage": 1,
+                  "user": 1,
+                  "waste": {"$subtract": ["$total_usage", "$filesize"]}}},
+
+    {"$sort": {"waste": -1}},
+    {"$limit": 1000}]
+
+
+@persistent_cache(leip.get_cache_dir('mad2', 'mongo', 'waste'), 1,  24*60*60)
+def _run_waste_command(app, name, force=False):
+    """
+    Execute mongo command.
+    """
+    MONGO_mad = get_mongo_transient_db(app)
+    res = MONGO_mad.aggregate(FIND_WASTER_PIPELINE, allowDiskUse=True)
+    return list(res)
+
+
+@leip.flag('-N', '--no-color', help='no ansi coloring of output')
+@leip.flag('--todb', help='save to mongo')
+@leip.arg('-n', '--no-records', default=20, type=int)
+@leip.flag('-f', '--force')
+@leip.command
+def waste(app, args):
+
+    db = get_mongo_transient_db(app)
+
+    res = _run_waste_command(app, 'waste_pipeline',
+                             force=args.force)
+
+    if args.todb:
+        dbrec = {'time': datetime.datetime.utcnow(),
+                 'data': res}
+        db = mad2.util.get_mongo_db(app)
+        db.waste.insert_one(dbrec)
+        return
+
+    def cprint_nocolor(*args, **kwargs):
+        if 'color' in kwargs:
+            del kwargs['color']
+        if len(args) > 1:
+            args = args[:1]
+        print(*args, **kwargs)
+
+    # if args.no_color:
+    #     cprint = cprint_nocolor
+
+    for i, r in enumerate(res):
+        if i >= args.no_records:
+            break
+
+        sha1sum = r['_id']
+        if not sha1sum.strip():
+            continue
+
+        cprint(sha1sum, 'yellow', end='')
+        cprint(" sz ", "grey", end="")
+        cprint("{:>9}".format(humansize(r['waste'])), end='')
+        cprint(" w ", "grey", end="")
+        cprint("{:>9}".format(humansize(r['filesize'])), end='')
+        hostcount = collections.defaultdict(lambda: 0)
+        hostsize = collections.defaultdict(lambda: 0)
+        owners = set()
+        for f in db.find({'sha1sum': sha1sum}):
+            owners.add(f['username'])
+            host = f['host']
+            hostcount[host] += 1
+            hostsize[host] += float(f['filesize']) / float(f['nlink'])
+
+        for h in hostcount:
+            print(' ', end='')
+            cprint(h, 'green', end=':')
+            cprint(hostcount[h], 'cyan', end="")
+
+        cprint(" ", end="")
+        cprint(", ".join(owners), 'red')

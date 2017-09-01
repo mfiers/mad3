@@ -1,8 +1,12 @@
 """Tests on an instantiated m3 app."""
 
+import os
+
 import leip
 import pytest
 import pymongo
+
+from testutil import run_m3
 
 
 @pytest.fixture(scope='module')
@@ -19,6 +23,17 @@ def testdb(m3app):
     db = mad3.db.get_db(m3app)
     yield db.testdb
     db.drop_collection('testdb')
+
+
+@pytest.fixture(scope='module')
+def testdir():
+    import tempfile
+    import shutil
+    testdir = tempfile.mkdtemp('m3_test')
+    with open(os.path.join(testdir, 'dummy.txt'), 'w') as F:
+        F.write('test\n')
+    yield testdir
+    shutil.rmtree(testdir)
 
 
 def test_m3app_init(m3app):
@@ -58,3 +73,19 @@ def test_m3app_dbworks(testdb):
     assert 'c' in newrec
     assert newrec['a'] == 1
     assert newrec['c'] == '3'
+
+
+def test_m3app_simple_set(m3app, testdir):
+    testfile = os.path.join(testdir, 'dummy.txt')
+    assert os.path.exists(testdir)
+    assert os.path.exists(testfile)
+    out, err = run_m3('show', testfile)
+
+    assert ('sha256	f2ca1bb6c7e907d06dafe4687e579fce76b37e4e' +
+            '93b7605022da52e6ccc26fd2') in out
+
+    run_m3("set", "ic", "Testy Testface", testfile)
+    
+    out, err = run_m3("show", testfile)
+    assert "investigation_contact" in out
+    assert "Testy Testface" in out

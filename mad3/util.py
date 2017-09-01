@@ -9,6 +9,8 @@ import sys
 from typing import Type
 import uuid
 
+import leip
+
 
 lg = logging.getLogger(__name__)
 
@@ -114,6 +116,10 @@ datasetter = dict(one=setone,
 
 
 def key_info(conf, key):
+
+    if isinstance(conf, leip.app):
+        # in case we get the app (and not app.conf)
+        conf = conf.conf
 
     info = conf['keywords'].get(key)
 

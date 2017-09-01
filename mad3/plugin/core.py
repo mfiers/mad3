@@ -44,9 +44,30 @@ def create_index(app, args):
         db.transaction.create_index([(idx, pymongo.ASCENDING)])
 
 
+@leip.arg('term', nargs='*')
 @leip.command
 def find(app, args):
-    pass
+
+    query = {}
+
+    db = get_db(app)
+
+    for term in args.term:
+        rawkey, rawval = term.split('=', 1)
+        keyname, keyinfo = key_info(app, rawkey)
+        val = keyinfo['transformer'](rawval)
+        lg.info('search: {} {}'.format(keyname, val))
+        if keyinfo['shape'] == 'one':
+            if keyname not in query:
+                query[keyname] = {"$in": [val]}
+            else:
+                raise NotImplemented()
+        elif keyinfo['shape'] == 'set':
+            if keyname not in query:
+                query[keyname] = {'$all': [val]}
+
+    for rec in db.transient.find(query):
+        print(rec['filename'])
 
 
 @leip.flag('-H', '--human', help='human readable')

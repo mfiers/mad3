@@ -1,9 +1,13 @@
 
 
 from datetime import datetime
+import getpass
+import grp
+from functools import lru_cache
 import hashlib
 import logging
 import os
+import pwd
 import stat
 
 import pymongo.errors
@@ -34,7 +38,7 @@ def bulk_execute(app):
     except pymongo.errors.BulkWriteError as e:
         #from pprint import pprint
         #pprint(e.details)
-        raise 
+        raise
 
     try:
         app.bulk_core.execute()
@@ -72,24 +76,26 @@ def setset(data, k, v):
 class MadFile:
     """Representing a file + metadata."""
 
-    def __init__(self, app, filename):
+    def __init__(self, app, filename, quick=False):
         """Prepare the MadFile."""
         self.app = app
+        self.quick = quick
         self.dirty = False
-        
+
         self.app.counter['init_madfile'] += 1
 
         filename = os.path.abspath(os.path.expanduser(filename))
-        assert os.path.exists(filename)
+        if not os.path.exists(filename):
+            lg.warning("{} does not exist:".format(filename))
+            raise FileNotFound()
 
         if not os.access(filename, os.R_OK):
             raise PermissionError("m3 cannot read file {}".format(filename))
-        
+
         self.filename = filename
         self.filestat = os.stat(filename)
 
 
-        
         # step one - determine transient id of this file
         lg.debug('calc transient id for {}'.format(self.filename))
         self.transient_id = self.get_transient_id()
@@ -98,22 +104,26 @@ class MadFile:
         # check the database if a record with the transient id exists
         self.db = get_db(app)
         lg.debug('check transient rec for {}'.format(self.filename))
+
         self.transient_rec = self.db.transient.find_one({'_id': self.transient_id})
 
         # if there is no transient rec, calculate core id
+
         if self.transient_rec is None:
-            self.app.counter['notrans'] += 1
-
+            self.app.counter['-trans'] += 1
             lg.debug('transient record does not exist')
-
             # needs to be saved now
             self.dirty = True
 
-            # calculate fresh sha256
-            self.app.counter['chksum'] += 1
-            self.sha1, self.sha256 = self.calculate_checksum()
+            if self.quick:
+                self.app.counter['nochksum'] += 1
+                self.sha1, self.sha256 = '0', '0'
+            else:  # not quick, calculate all shasums
+                # calculate fresh sha256
+                self.app.counter['chksum'] += 1
+                self.sha1, self.sha256 = self.calculate_checksum()
 
-            # create an stub transient rec 
+            # create an stub transient rec
             self.transient_rec = {
                 '_id': self.transient_id,
                 'sha256': self.sha256,
@@ -129,35 +139,49 @@ class MadFile:
             self.app.counter['transload'] += 1
             self.sha256 = self.transient_rec['sha256']
             self.sha1 = self.transient_rec['sha1']
-            
+
+            #check if this was a Q&D record (and this is not a Q&D call)
+            if not self.quick and (self.sha256 == '0' or self.sha1 == '0'):
+                self.app.counter['unquicken'] += 1
+                self.sha1, self.sha256 = self.calculate_checksum()
+                self.transient_rec['sha256'] = self.sha256
+                self.transient_rec['sha1'] = self.sha1
+                self.dirty = True
+
             # refrehs the transient record - see if there are changes
             self.refresh()
 
             # if something changed - recalc thte sha256
             if self.dirty:
-                self.app.counter['re-chksum'] += 1
-                newsha1, newsha256 = self.calculate_checksum()
-                if newsha256 == self.transient_rec['sha256']:
-                    self.app.counter['sha256_ok'] += 1
+                if self.quick:
+                    self.app.counter['~dirty'] += 1
+                    #print('dirty?', self.filename)
                 else:
-                    self.app.counter['sha256_change!'] += 1
-                    self.transient_rec['sha1'] = newsha1
-                    self.transient_rec['sha256'] = newsha256
-                    # TODO: Create a transaction!!!
-                    # TODO: copy core record data??
+                    self.app.counter['re-chksum'] += 1
+                    newsha1, newsha256 = self.calculate_checksum()
+                    if newsha256 == self.transient_rec['sha256']:
+                        self.app.counter['sha256_ok'] += 1
+                    else:
+                        self.app.counter['sha256_change!'] += 1
+                        self.transient_rec['sha1'] = newsha1
+                        self.transient_rec['sha256'] = newsha256
+                        # TODO: Create a transaction!!!
+                        # TODO: copy core record data??
 
-        self.core_rec = self.db.core.find_one({'_id': self.sha256})
+        if not self.quick:
+            assert self.sha256 != "0"
+            self.core_rec = self.db.core.find_one({'_id': self.sha256})
 
-        if self.core_rec is None:
-            lg.debug('Core rec not found')
-            self.core_rec = {'_id': self.sha256, 'sha1': self.sha1}
-        else:
-            for k, v in self.core_rec.items():
-                if k == '_id': continue
-                if (k not in self.transient_rec) or \
-                        (self.transient_rec[k] != v):
-                    self.transient_rec[k] = v
-                    self.dirty = True
+            if self.core_rec is None:
+                lg.debug('Core rec not found')
+                self.core_rec = {'_id': self.sha256, 'sha1': self.sha1}
+            else:
+                for k, v in self.core_rec.items():
+                    if k == '_id': continue
+                    if (k not in self.transient_rec) or \
+                            (self.transient_rec[k] != v):
+                        self.transient_rec[k] = v
+                        self.dirty = True
 
         if self.dirty:
             lg.debug('dirty transient rec, saving')
@@ -191,13 +215,13 @@ class MadFile:
 
         if not 'transient' in keycat:
             return
-        
+
         # determine new key value using the `setter`
         changed, setvalue = setter(self.transient_rec, key, val)
 
         lg.debug('Set "{}" = "{}" for {}"'.format(key, val, setvalue))
 
-        if 'core' in keycat:
+        if not self.quick and 'core' in keycat:
             if (key in self.core_rec) and (self.core_rec[key] == setvalue):
                 #already in core
                 pass
@@ -239,7 +263,7 @@ class MadFile:
             self.app.bulk_transient\
                 .find({'_id': self.transient_id})\
                 .upsert().update({'$set': self.transient_rec})
-            if len(self.core_rec) > 1:
+            if not self.quick and len(self.core_rec) > 1:
                 lg.debug('also bulk storing core {}'.format(self.filename))
                 self.app.bulk_core\
                     .find({'_id': self.sha256})\
@@ -248,7 +272,7 @@ class MadFile:
             lg.debug('pepare normal update/save for {}'.format(self.filename))
             self.db.transient.update_one({'_id': self.transient_id},
                                          {'$set': self.transient_rec})
-            if len(self.core_rec) > 1:
+            if not self.quick and len(self.core_rec) > 1:
                 self.db.core.update_one({'_id': self.sha256},
                                         {'$set': self.core_rec})
         self.dirty = False
@@ -259,15 +283,33 @@ class MadFile:
         return self.transient_rec[key]
 
 
+
     def refresh(self):
         """Refresh the transient record, and check if up to date.
         """
+
+        @lru_cache(1000)
+        def getgroup(gid):
+            try:
+                return grp.getgrgid(gid).gr_name
+            except KeyError:
+                return '__unknown__'
+
+        @lru_cache(1000)
+        def getuser(uid):
+            try:
+                return pwd.getpwuid(uid).pw_name
+            except KeyError:
+                return '__unknown__'
+
         statmap = dict(
             size=self.filestat[stat.ST_SIZE],
             nlink=self.filestat[stat.ST_NLINK],
             mtime=datetime.fromtimestamp(self.filestat[stat.ST_MTIME]),
             gid=self.filestat[stat.ST_GID],
             uid=self.filestat[stat.ST_UID],
+            user=getuser(self.filestat[stat.ST_UID]),
+            group=getgroup(self.filestat[stat.ST_GID]),
             mode=self.filestat[stat.ST_MODE])
 
         for k, v in statmap.items():
@@ -275,11 +317,12 @@ class MadFile:
                 if self.transient_rec[k] == v:
                     continue
                 else:
-                    lg.debug("transstat changed {}, {}".format(k, v))
+                    lg.debug("transstat changed {}, {} -> {}"\
+                               .format(k, self.transient_rec[k], v))
                     self.transient_rec[k] = v
                     self.dirty = True
             else:
-                lg.debug("transstat new {}, {}".format(k, v))    
+                lg.debug("transstat new {}, {}".format(k, v))
                 self.transient_rec[k] = v
                 self.dirty = True
 
@@ -292,10 +335,10 @@ class MadFile:
           - hostname
           - filename
 
-        Technically,  these fields could also be added, but if the former 
-        two are the same, it is very likely the same file. Otherwise we'll 
+        Technically,  these fields could also be added, but if the former
+        two are the same, it is very likely the same file. Otherwise we'll
         pick up a change
-   
+
           - filesize
           - last modification time
 
@@ -319,7 +362,7 @@ class MadFile:
                     h1.update(chunk)
                     h2.update(chunk)
                     self.app.counter['chksum_sz'] += len(chunk)
-                    
+
             return h1.hexdigest(), h2.hexdigest()
 
         except IOError:

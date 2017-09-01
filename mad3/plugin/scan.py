@@ -32,12 +32,15 @@ def print_counter(c):
     sys.stdout.flush()
 
 
+@leip.flag('-q', '--quick', help='do not calculate shasums, do not store data '
+           'in the core database')
 @leip.flag('-r', '--refresh', help='refresh all files')
 @leip.command
 def scan(app, args):
 
     basedir = os.getcwd().rstrip('/') + '/'
     db = get_db(app)
+    starttime = time.time()
 
     app.bulk_init()
 
@@ -124,7 +127,7 @@ def scan(app, args):
 
         app.counter['changed'] += 1
         try:
-            mfile = MadFile(app, filename)
+            mfile = MadFile(app, filename, quick=args.quick)
         except PermissionError as e:
             app.counter['noaccess'] += 1
             continue
@@ -140,4 +143,112 @@ def scan(app, args):
 
     print_counter(app.counter)
     # ensure we end on a newline
-    print()
+    print("\nruntime: {:.4f}".format(time.time() - starttime))
+
+
+
+@leip.flag('-q', '--quick', help='do not calculate shasums, do not store data '
+           'in the core database')
+@leip.flag('-r', '--refresh', help='refresh all files')
+@leip.command
+def scan2(app, args):
+
+    basedir = os.getcwd().rstrip('/') + '/'
+    db = get_db(app)
+    lastscreenupdate = starttime = time.time()
+    app.bulk_init()
+
+    ff_regex = "^{}".format(basedir)
+
+    lg.info("Query database for files below\n    {}".format(basedir))
+    allfilesdb = db.transient.find({'filename': {"$regex": ff_regex}},
+                                 projection=['filename', 'mtime', 'size'])
+
+    file2id = {}
+    allfiles = []
+    for x in allfilesdb:
+        allfiles.append((x['filename'], x['mtime'], x['size']))
+        file2id[x['filename']] = x['_id']
+
+    allfiles = set(allfiles)
+    # print(len(allfiles))
+    lg.info("Found {} files in db".format(len(allfiles)))
+    app.counter['indb'] = len(allfiles)
+    app.message('Files in db: {}'.format(len(allfiles)))
+
+
+    # run Unix FIND (seems the fastest way, plus we get the benefit
+    # of adding in grep)
+
+
+    madignore = os.path.expanduser('~/.madignore')
+    cwd = os.path.abspath(os.path.normpath(os.getcwd()))
+    cl = r"find {} -type f -printf '%p\t%T@\t%s\n'".format(cwd)
+
+    if os.path.exists(madignore):
+        cl += ' | grep -v -f ~/.madignore'
+
+    lg.info('running unix find')
+
+    def cnv2(l):
+        p, m, s = l.rsplit("\t", 2)
+        m = datetime.fromtimestamp(int(math.floor(float(m))))
+        s = int(s)
+        return (p, m, s)
+
+    deleted = set()
+    changed = set()
+    onfs = set()
+
+
+    P = sp.Popen(cl, shell=True, bufsize=1 stdout=sp.PIPE, stderr=sp.DEVNULL)
+    with P.stdout as uxfind:
+        for ii, line in enumerate(uxfind.readlines()):
+
+            ffile = cnv2(line.strip().decode())
+            if not ffile:
+                continue
+
+            onfs.add(ffile)
+            app.counter['seenonfs'] += 1
+            in_allfiles = ffile in allfiles
+            if (in_allfiles and args.refresh) or \
+                    (not in_allfiles):
+                #needs refreshing
+
+                filename = ffile[0]
+                if in_allfiles:
+                    app.counter['refresh'] += 1
+                else:
+                    app.counter['new'] += 1
+
+                try:
+                    mfile = MadFile(app, filename, quick=args.quick)
+                except PermissionError as e:
+                    app.counter['noxs'] += 1
+                    continue
+
+                if mfile.dirty:
+                    mfile.save()
+
+                if time.time() - lastscreenupdate > 2:
+                    print_counter(app.counter)
+                    lastscreenupdate = time.time()
+            else:
+                # ignoring this file, it exists, and has not changed
+                app.counter['notnew'] += 1
+
+    app.bulk_execute()
+
+    deleted = list(allfiles - onfs)
+
+    app.counter['onfs'] = len(onfs)
+    app.counter['rm'] = len(deleted)
+    delids = [file2id[x[0]] for x in deleted]
+
+    db.transient.remove({'_id': {"$in": delids}})
+    lg.info("{} files seem changed".format(len(changed)))
+
+    print_counter(app.counter)
+    # ensure we end on a newline
+    print("\nruntime: {:.4f}".format(time.time() - starttime))
